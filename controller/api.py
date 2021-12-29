@@ -2,6 +2,7 @@ import os
 import json
 import time
 import threading
+import queue
 
 
 # --> NXT Imports
@@ -9,6 +10,16 @@ import nxt.locator
 from nxt.motor import *
 from nxt.sensor.generic import Ultrasonic
 from nxt.sensor.__init__ import Port as SPort
+
+
+class Controller:
+	def __init__(self, *args):
+		self.queues = list(args)
+
+	def stop(self):
+		for q in self.queues:
+			q.put_nowait({})
+
 
 class NXTClient:
 	
@@ -22,8 +33,10 @@ class NXTClient:
 		self.motor_a = self.brick.get_motor(Port.A)
 		self.motor_b = self.brick.get_motor(Port.B)
 		self.motor_c = self.brick.get_motor(Port.C)
+
+
 		self.speeds = {
-			'low': 20,
+			'low': 15,
 			'med': 45,
 			'fast': 70,
 			'full': 100,
@@ -50,24 +63,41 @@ class NXTClient:
 		|_|  |_|\___/ \__\___/|_|   
 	"""
 
-	def run_motor(self, motor='A', power='low', duration=1, force_break=False):
+	@staticmethod
+	def motor_run_state(motor):
+		run_state = motor._get_state().run_state
+		return run_state
 
-		if motor == 'A':
-			motor = self.motor_a
-		elif motor == 'B':
-			motor = self.motor_b
-		elif motor == 'C':
-			motor = self.motor_c
+	@staticmethod
+	def run_motor(motor, power, wait=10):
 
-		if isinstance(power, str):
-			motor.run(power=self.speeds[power], regulated=True)
-		elif isinstance(power, int):
+		# --> 1. Define thread function
+		def _run_motor(motor, power, queue, wait):
+			# --> 1. Run motor
 			motor.run(power=power, regulated=True)
-		time.sleep(duration)  # Seconds
-		motor.idle()
 
-		if force_break is True:
+			# --> 2. Check queue for stopping motor
+			counter = 0
+			sleep_counter = wait / 0.05
+			while queue.empty():
+				time.sleep(0.05)
+				counter += 1
+				if counter > sleep_counter:
+					break
+
+			# --> 3. Stop motor
+			motor.idle()
 			motor.brake()
+
+		# --> 2. Create stop queue
+		stop_queue = queue.Queue()
+
+		# --> 3. Create thread + start
+		th = threading.Thread(target=_run_motor, args=(motor, power, stop_queue, wait))
+		th.start()
+
+		# --> 4. Return stop queue
+		return stop_queue
 
 	@staticmethod
 	def turn_motor(motor, speed, degrees, blocking=False):
@@ -85,7 +115,38 @@ class NXTClient:
 		|_|  |_|\___/ \_/ \___|				
 	"""
 
-	def move_forward(self, power='low', duration=1, force_break=True, blocking=False, reverse=False):
+	def move(self, direction, power='low'):
+		return self._move(direction, power)
+
+	def _move(self, direction, power='low'):
+
+		# --> 1. Get power from direction
+		power = self.speeds[power]
+		power_a = power
+		power_b = power
+		if direction == 'b':
+			power_a *= -1
+			power_b *= -1
+		elif direction == 'cw':
+			power_a *= -1
+		elif direction == 'ccw':
+			power_b *= -1
+
+		# --> 2. Start motors
+		a_stop_q = NXTClient.run_motor(self.motor_a, power_a)
+		b_stop_q = NXTClient.run_motor(self.motor_b, power_b)
+
+		# --> 3. Return controller
+		return Controller(a_stop_q, b_stop_q)
+
+
+
+
+
+
+
+
+	def move_forward_2(self, power='low', duration=1, force_break=True, blocking=False, reverse=False):
 		
 		power = int(self.speeds[power])
 		if reverse is True:
